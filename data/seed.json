@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "pantry": [
+    { "id": "chickpeas", "name": "Chickpeas", "amount": 1, "unit": "can", "category": "Tinned" },
+    { "id": "coconut-milk", "name": "Coconut milk", "amount": 400, "unit": "ml", "category": "Tinned" },
+    { "id": "baby-spinach", "name": "Baby spinach", "amount": 75, "unit": "g", "category": "Produce" },
+    { "id": "red-onion", "name": "Red onion", "amount": 1, "unit": "each", "category": "Produce" },
+    { "id": "garlic", "name": "Garlic", "amount": 3, "unit": "cloves", "category": "Produce" },
+    { "id": "passata", "name": "Passata", "amount": 300, "unit": "ml", "category": "Tinned" },
+    { "id": "basmati-rice", "name": "Basmati rice", "amount": 100, "unit": "g", "category": "Grains" },
+    { "id": "lime", "name": "Lime", "amount": 0, "unit": "each", "category": "Produce" }
+  ],
+  "shoppingList": [],
+  "reminders": []
+}
