@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { DemoStateSchema, type ChangePreviewInput, type DemoState, type MissingItemInput, type PantryResult, type PrepReminder, type ShoppingListItem, toPantryResult } from "../shared/types.js";
+import { fileURLToPath } from "node:url";
+import { DemoStateSchema, type ChangePreview, type ChangePreviewInput, type DemoState, type MissingItemInput, type PrepReminder, type ShoppingListItem } from "../shared/types.js";
 import { buildRecipeMatch, getRecipe, missingShoppingItems, normalizeIngredientName, validateMissingItems } from "./recipe.js";
+
+const projectRootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const defaultDataDirectory = resolve(process.env.TABLEREADY_DATA_DIR ?? join(projectRootDirectory, "data"));
 
 type PreparedCommit =
   | { action: "add_to_shopping_list"; recipeId: string; servings: number; items: MissingItemInput[] }
@@ -20,26 +24,19 @@ type StoredConfirmation = {
   expiresAt: number;
 };
 
-type ChangePreview = {
-  confirmationToken: string;
-  action: string;
-  summary: string;
-  items: MissingItemInput[];
-};
-
 const countableUnits = new Set(["can", "each", "cloves"]);
 const roundAmount = (amount: number) => Math.round(amount * 100) / 100;
 
-function parseState(json: string, path: string): DemoState {
+function parseState(json: string): DemoState {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
   } catch {
-    throw new Error("Local demo data at " + path + " is not valid JSON. Run npm run data:reset to restore the demo.");
+    throw new Error("Local demo data is not valid JSON. Run npm run data:reset to restore the demo.");
   }
   const result = DemoStateSchema.safeParse(parsed);
   if (!result.success) {
-    throw new Error("Local demo data at " + path + " has an unsupported shape. Run npm run data:reset to restore the demo.");
+    throw new Error("Local demo data has an unsupported shape. Run npm run data:reset to restore the demo.");
   }
   return result.data;
 }
@@ -105,10 +102,10 @@ function commitFromPreview(state: DemoState, input: ChangePreviewInput): { commi
   }
 }
 
-export function createDemoStore(rootDirectory = process.cwd()) {
-  const dataDirectory = resolve(rootDirectory, "data");
+export function createDemoStore(rootDirectory?: string) {
+  const dataDirectory = rootDirectory ? resolve(rootDirectory, "data") : defaultDataDirectory;
   const statePath = join(dataDirectory, "runtime-state.json");
-  const seedPath = join(dataDirectory, "seed.json");
+  const seedPath = rootDirectory ? join(dataDirectory, "seed.json") : join(projectRootDirectory, "data", "seed.json");
   const confirmations = new Map<string, StoredConfirmation>();
   let writeQueue: Promise<unknown> = Promise.resolve();
 
@@ -117,27 +114,47 @@ export function createDemoStore(rootDirectory = process.cwd()) {
     const temporaryPath = statePath + "." + randomUUID() + ".tmp";
     try {
       await writeFile(temporaryPath, JSON.stringify(state, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
-      await rename(temporaryPath, statePath);
+      let renameError: unknown;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        try {
+          await rename(temporaryPath, statePath);
+          renameError = undefined;
+          break;
+        } catch (error) {
+          renameError = error;
+          const retryable = error && typeof error === "object" && "code" in error && ["EPERM", "EACCES", "EBUSY"].includes(String(error.code));
+          if (!retryable || attempt === 3) throw error;
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 40 * (attempt + 1)));
+        }
+      }
+      if (renameError) throw renameError;
     } catch (error) {
       await unlink(temporaryPath).catch(() => undefined);
-      throw error;
+      throw new Error("Could not save local demo data. Check the data directory permissions and try again.");
     }
   }
 
   async function readSeed(): Promise<DemoState> {
-    return parseState(await readFile(seedPath, "utf8"), seedPath);
+    let seedJson: string;
+    try {
+      seedJson = await readFile(seedPath, "utf8");
+    } catch {
+      throw new Error("Could not read the demo seed data. Check the local project files and try again.");
+    }
+    return parseState(seedJson);
   }
 
   async function readExistingOrSeed(): Promise<DemoState> {
     try {
-      return parseState(await readFile(statePath, "utf8"), statePath);
+      return parseState(await readFile(statePath, "utf8"));
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
         const seed = await readSeed();
         await writeAtomically(seed);
         return seed;
       }
-      throw error;
+      if (error instanceof Error && error.message.startsWith("Local demo data")) throw error;
+      throw new Error("Could not read local demo data. Check the data directory permissions and try again.");
     }
   }
 
@@ -149,12 +166,13 @@ export function createDemoStore(rootDirectory = process.cwd()) {
 
   async function read(): Promise<DemoState> {
     try {
-      return parseState(await readFile(statePath, "utf8"), statePath);
+      return parseState(await readFile(statePath, "utf8"));
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
         return serializeWrite(readExistingOrSeed);
       }
-      throw error;
+      if (error instanceof Error && error.message.startsWith("Local demo data")) throw error;
+      throw new Error("Could not read local demo data. Check the data directory permissions and try again.");
     }
   }
 
@@ -163,6 +181,11 @@ export function createDemoStore(rootDirectory = process.cwd()) {
     const prepared = commitFromPreview(state, input);
     for (const [token, confirmation] of confirmations) {
       if (confirmation.expiresAt <= Date.now()) confirmations.delete(token);
+    }
+    while (confirmations.size >= 100) {
+      const oldest = confirmations.keys().next().value;
+      if (oldest === undefined) break;
+      confirmations.delete(oldest);
     }
     const confirmationToken = randomUUID();
     confirmations.set(confirmationToken, { expected: prepared.commit, expiresAt: Date.now() + 10 * 60_000 });
@@ -184,10 +207,10 @@ export function createDemoStore(rootDirectory = process.cwd()) {
       if (stableJson(confirmation.expected) !== stableJson(commitInput)) {
         throw new Error("This confirmation does not match the requested change. Review the change again before saving.");
       }
-      confirmations.delete(confirmationToken);
       const result = operation(state);
       const validated = DemoStateSchema.parse(result.state);
       await writeAtomically(validated);
+      confirmations.delete(confirmationToken);
       return { state: validated, value: result.value };
     });
   }
@@ -198,10 +221,10 @@ export function createDemoStore(rootDirectory = process.cwd()) {
       const now = new Date().toISOString();
       const added: ShoppingListItem[] = [];
       for (const candidate of input.items) {
-        const existing = state.shoppingList.find((item) => !item.checked && normalizeIngredientName(item.name) === normalizeIngredientName(candidate.name) && item.unit === candidate.unit);
+        const existing = state.shoppingList.find((item) => !item.checked && item.sourceRecipeId === input.recipeId && normalizeIngredientName(item.name) === normalizeIngredientName(candidate.name) && item.unit === candidate.unit);
         if (existing) {
           existing.amount = roundAmount(existing.amount + candidate.amount);
-          added.push({ ...existing });
+          added.push({ ...existing, amount: candidate.amount });
         } else {
           const item: ShoppingListItem = {
             id: randomUUID(),
@@ -270,6 +293,12 @@ export function createDemoStore(rootDirectory = process.cwd()) {
         if (!pantryItem) throw new Error(ingredient.name + " is no longer in your pantry.");
         pantryItem.amount = roundAmount(Math.max(0, pantryItem.amount - ingredient.amount));
       }
+      const usedIngredients = new Set(match.ingredients.map((ingredient) => normalizeIngredientName(ingredient.name) + "|" + ingredient.unit));
+      state.shoppingList = state.shoppingList.filter((item) => !(
+        item.checked
+        && item.sourceRecipeId === recipe.id
+        && usedIngredients.has(normalizeIngredientName(item.name) + "|" + item.unit)
+      ));
       return { state, value: "Enjoy " + recipe.name + "! Its ingredients have been deducted from your pantry." };
     });
   }
@@ -316,25 +345,11 @@ export function createDemoStore(rootDirectory = process.cwd()) {
 }
 
 export const demoStore = createDemoStore();
-
-export const readDemoState = demoStore.read;
-export const previewChange = demoStore.preview;
-export const addShoppingItems = demoStore.addShopping;
-export const savePrepReminder = demoStore.setReminder;
-export const markShoppingItemBought = demoStore.markBought;
-export const deleteShoppingItem = demoStore.removeShoppingItem;
-export const cookRecipe = demoStore.markCooked;
-export const updatePantryItem = demoStore.setPantryItem;
-export const cancelPrepReminder = demoStore.cancelReminder;
 export const resetDemoState = demoStore.reset;
-
-export function pantryResult(state: DemoState): PantryResult {
-  return toPantryResult(state);
-}
 
 export async function builtClientExists(): Promise<boolean> {
   try {
-    await access(join(resolve(process.cwd(), "dist", "client"), "index.html"));
+    await access(join(projectRootDirectory, "dist", "client", "index.html"));
     return true;
   } catch {
     return false;

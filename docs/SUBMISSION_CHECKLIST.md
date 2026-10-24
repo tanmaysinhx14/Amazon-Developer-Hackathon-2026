@@ -4,22 +4,23 @@
 
 - [ ] GitHub repository contains all source code, original assets, and accurate setup/run instructions.
 - [ ] Public repository has an open-source license visible on GitHub, or private repository access is granted to the reviewers listed in the current rules.
-- [x] npm install, npm run dev, npm run build, npm test, and npm run data:reset are implemented; build and tests have passed in this workspace.
+- [ ] Re-run npm test, npm run dev, and npm run data:reset after the review fixes; npm run build passed on October 23, 2026.
 - [ ] Runtime state, environment files, credentials, and local configuration are not committed.
 - [ ] Project description explains the household dinner-planning need, pantry matching, and all ten MCP tools.
 - [ ] Selected primary track: Alexa+. Do not claim the AWS Builder or Open Source mini-challenge without separately meeting their requirements.
 - [x] The project is described as a local Alexa+ simulation and self-hosted MCP demo. It does not claim Alexa+ connectivity, model use, or push notifications.
-- [x] README includes a read-only MCP Inspector CLI command for tools/list against the local HTTP endpoint.
+- [ ] README includes an MCP Inspector CLI command for tools/list against the local Streamable HTTP endpoint; verify the command with the current Inspector CLI.
 
 ## Demo video
 
 - [ ] Public, English YouTube or Vimeo video; under 3 minutes (target 2:30).
 - [ ] Show the app and a multi-step story: pantry match, recipe carousel, missing amounts, confirmation, shopping-list save, mark bought, cook and pantry deduction, reminder save/cancel, and the MCP trace.
 - [ ] Say “Streamable HTTP”; show the browser's initialize, tools/list, and tools/call trace.
+- [ ] Describe the confirmation accurately: the browser asks the person to approve; the one-use server token only binds the preview to the write.
 - [ ] Show the MCP Inspector briefly with the local tools, pantry resource, or plan-tonight prompt. Keep the tour read-only.
 - [ ] Explain the customer problem and why the flow helps a busy household.
 - [ ] Avoid third-party footage, images, and music unless usage rights are clear.
-- [ ] Freeze code and video by October 22; confirm the final Devpost deadline and timezone against the live rules.
+- [ ] The October 22 freeze target has passed; review the updated code and video, then confirm the final Devpost deadline and timezone against the live rules.
 
 ## Product feedback
 
@@ -37,8 +38,8 @@ These notes are from implementation and local use. Setup time was not separately
 | React | Browser UI, recipe carousel, conversation panel, and accessible confirmation | State changes and dialog flows remain in one browser app without adding a backend UI framework | Keep the number of local action states manageable as more intents are added | Vite serves the local UI; initial route connects to MCP and displays live data | Yes; it suits the small interaction-heavy demo |
 | Vite | Development server, MCP proxy, and client production bundle | Fast local iteration and a same-origin MCP route worked in the demo | The production server must serve the built client separately; both run paths are documented | npm run dev starts the UI and MCP server; elapsed time not measured | Yes; local iteration and static client output are straightforward |
 | Zod 4 | Shared tool input/output contracts and browser structuredContent validation | The same schemas check server output and browser responses | Keep exported inferred types beside the schema definitions to avoid duplicate contracts | Build one shared schema and use it at both tool and client boundaries | Yes; runtime validation complements TypeScript at the MCP boundary |
-| Vitest | Recipe math, serialized storage writes, malformed JSON, token checks, and MCP integration | Eight tests passed in isolated temporary data directories | Add browser component coverage if the UI grows beyond this demo; none is currently claimed | npm test runs the suite without changing the saved runtime state | Yes; it covers the server behavior that must stay deterministic |
-| MCP Inspector | Independent CLI listing of local tools, resources, and prompts | It connects to the Streamable HTTP endpoint without changing demo data | No blocker observed in read-only inspection | Start the local server, then run the README tools/list command; first-run package download may be required | Yes; it gives reviewers a separate view of the MCP surface |
+| Vitest | Recipe math, serialized storage writes, malformed JSON, token checks, and MCP integration | The existing suite has prior results in isolated temporary data directories; rerun after the review fixes | A browser-level smoke test for add, confirm, bought, and cooked is still missing | npm test runs the suite without changing the saved runtime state | Yes; it covers the server behavior that must stay deterministic |
+| MCP Inspector | Independent CLI listing of local tools, resources, and prompts | A prior run connected to the local Streamable HTTP endpoint | Rerun the updated command against the current origin checks | Start the local server and run the README tools/list command; npx may download the CLI on first use | Yes; it gives reviewers a separate view of the MCP surface |
 
 ## Optional friction log
 

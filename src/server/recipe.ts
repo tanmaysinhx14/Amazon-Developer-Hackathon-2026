@@ -84,7 +84,7 @@ export const RECIPES: readonly RecipeDefinition[] = [
   {
     id: "lemon-spinach-pasta",
     name: "Lemon spinach pasta",
-    description: "A bright, silky pasta with wilted greens, garlic, and a little parmesan.",
+    description: "A bright, silky pasta with wilted greens, garlic, and a little vegetarian hard cheese.",
     diet: "vegetarian",
     prepMinutes: 19,
     baseServings: 2,
@@ -93,14 +93,14 @@ export const RECIPES: readonly RecipeDefinition[] = [
       { name: "Baby spinach", amount: 80, unit: "g" },
       { name: "Lemon", amount: 1, unit: "each" },
       { name: "Garlic", amount: 2, unit: "cloves" },
-      { name: "Parmesan", amount: 40, unit: "g" },
+      { name: "Hard cheese (vegetarian)", amount: 40, unit: "g" },
       { name: "Olive oil", amount: 20, unit: "ml" },
     ],
     steps: [
       "Cook the pasta in salted water, saving a mug of pasta water before draining.",
       "Warm the olive oil and gently cook the sliced garlic until fragrant.",
       "Add the spinach, pasta, lemon zest, and a splash of pasta water; toss until glossy.",
-      "Finish with lemon juice and finely grated parmesan.",
+      "Finish with lemon juice and finely grated vegetarian hard cheese.",
     ],
   },
   {
@@ -178,7 +178,7 @@ export function buildRecipeMatch(state: DemoState, recipeId: string, servings: n
     const pantryAmount = Math.round(Math.min(amount, available) * 100) / 100;
     const missingAmount = Math.round(Math.max(0, amount - pantryAmount) * 100) / 100;
     const listedAmount = state.shoppingList
-      .filter((item) => !item.checked && normalizeIngredientName(item.name) === normalizeIngredientName(ingredient.name) && item.unit === ingredient.unit)
+      .filter((item) => !item.checked && item.sourceRecipeId === recipe.id && normalizeIngredientName(item.name) === normalizeIngredientName(ingredient.name) && item.unit === ingredient.unit)
       .reduce((total, item) => total + item.amount, 0);
     const shoppingAmount = Math.round(Math.min(missingAmount, listedAmount) * 100) / 100;
     const rawToBuy = Math.max(0, missingAmount - shoppingAmount);
@@ -203,7 +203,7 @@ export function findRecipes(state: DemoState, servings: number, maxPrepMinutes: 
   return RECIPES
     .filter((recipe) => recipe.prepMinutes <= maxPrepMinutes && (diet === "vegetarian" || recipe.diet === "vegan"))
     .map((recipe) => buildRecipeMatch(state, recipe.id, servings))
-    .sort((a, b) => b.pantryMatchCount - a.pantryMatchCount || a.prepMinutes - b.prepMinutes || a.name.localeCompare(b.name));
+    .sort((a, b) => (b.pantryMatchCount / b.ingredients.length) - (a.pantryMatchCount / a.ingredients.length) || a.prepMinutes - b.prepMinutes || a.name.localeCompare(b.name));
 }
 
 export function missingShoppingItems(match: RecipeMatch): MissingItemInput[] {

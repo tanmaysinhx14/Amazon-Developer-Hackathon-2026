@@ -88,8 +88,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .number-field { display: flex; align-items: center; gap: 4px; min-height: 37px; padding: 0 9px; border: 1px solid #d3ddcc; border-radius: 8px; color: #314b3b; background: #fffefa; }
 .number-field input { width: 43px; border: 0; outline: 0; color: #254636; background: transparent; font-size: 14px; font-weight: 700; }
 .number-field input:focus-visible { outline: 0; }
+.number-field:focus-within { outline: 3px solid #bf774e; outline-offset: 2px; }
 .number-field span { color: #4c5b50; font-size: 12px; white-space: nowrap; }
-.diet-select, .reminder-delay-row select { min-height: 37px; padding: 0 9px; border: 1px solid #d3ddcc; border-radius: 8px; color: #344c3d; background: #fffefa; font-size: 12px; }
+.diet-select, .reminder-inline select { min-height: 37px; padding: 0 9px; border: 1px solid #d3ddcc; border-radius: 8px; color: #344c3d; background: #fffefa; font-size: 12px; }
 .field-error { margin: 6px 0 0; color: #8c3020; font-size: 12px; }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 0 14px; border: 1px solid transparent; border-radius: 8px; font-size: 13px; font-weight: 670; text-decoration: none; transition: transform .16s ease, background .16s ease, border-color .16s ease, box-shadow .16s ease; }
 .button:hover:not(:disabled) { transform: translateY(-1px); }
@@ -130,8 +131,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .ingredient-list li:last-child { border-bottom: 0; }
 .ingredient-status { width: 18px; height: 18px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; color: #3c7046; background: #eaf2e6; font-size: 12px; font-weight: 700; }
 .ingredient-name { flex: 1; color: #415147; }
-.ingredient-amount { color: #526057; font-size: 12px; white-space: nowrap; }
+.ingredient-amount { color: #526057; font-size: 12px; white-space: normal; }
 .ingredient-amount strong { margin-right: 3px; color: #91482f; font-size: 12px; font-weight: 700; }
+.ingredient-unit-note { display: block; max-width: 230px; margin-top: 3px; color: #755c45; font-size: 10px; line-height: 1.35; }
 .ingredient-list li.is-missing .ingredient-status { color: #934b32; background: #faeee6; }
 .missing-note, .all-here-note { margin-top: 9px; padding: 9px 10px; border-radius: 8px; color: #6d472f; background: #fbf3e8; font-size: 12px; line-height: 1.45; }
 .missing-note strong { color: #633b29; }
@@ -175,8 +177,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .utterance-chips { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
 .utterance-chips button { min-height: 32px; padding: 4px 10px; border: 1px solid #d3dfd0; border-radius: 999px; color: #375943; background: #fffefa; font-size: 12px; }
 .utterance-chips button:hover { border-color: #94aa8c; background: #f8faf5; }
-.reminder-delay-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 10px; color: #4e5c51; font-size: 12px; }
-.reminder-delay-row select { min-height: 33px; }
+.reminder-inline { display: inline-flex; align-items: center; gap: 6px; color: #4e5c51; font-size: 12px; }
+.reminder-inline select { min-height: 36px; }
 
 .side-card { padding: 16px; border: 1px solid #e0e2da; border-radius: 14px; background: #fffefa; box-shadow: 0 3px 10px rgba(45,59,48,.025); }
 .side-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -266,6 +268,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .dialog-items strong { color: #87452f; font-size: 13px; font-weight: 700; }
 .dialog-error { margin: 0 0 12px; color: #8c3020; font-size: 13px; }
 .dialog-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding-top: 12px; border-top: 1px solid #e9ebe4; }
+.button-danger { color: #fff; background: #9a3f2c; box-shadow: 0 3px 7px rgba(125,45,31,.13); }
+.button-danger:hover:not(:disabled) { background: #7d3022; }
+.due-reminder-list { display: grid; gap: 7px; margin-top: 4px; }
+.due-reminder-item { display: flex; align-items: center; gap: 10px; }
+.due-reminder-item button { margin-left: auto; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
 @media (max-width: 1050px) {
@@ -276,8 +283,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   .pantry-row .text-button { grid-column: 2 / -1; justify-self: end; }
 }
 @media (max-width: 800px) {
-  .topbar { grid-template-columns: 1fr auto; padding: 0 20px; }
-  .top-nav { display: none; }
+  .topbar { height: auto; grid-template-columns: 1fr auto; grid-template-rows: auto auto; row-gap: 8px; padding: 10px 20px; }
+  .top-nav { display: flex; grid-column: 1 / -1; grid-row: 2; align-self: auto; justify-content: center; gap: clamp(14px, 5vw, 30px); min-height: 28px; }
+  .top-nav a { min-height: 28px; }
   .page-wrap { width: min(690px, calc(100% - 34px)); padding-top: 30px; }
   .main-grid { grid-template-columns: 1fr; }
   .side-column { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
@@ -286,9 +294,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   .planner-card { grid-template-columns: minmax(0,1fr) minmax(220px,.72fr); }
 }
 @media (max-width: 580px) {
-  .topbar { height: 64px; padding: 0 14px; }
+  .topbar { padding: 9px 14px; }
   .brand-word { font-size: 17px; }
   .topbar-right { gap: 9px; }
+  .top-nav { justify-content: space-between; gap: 10px; }
+  .top-nav a { font-size: 12px; }
   .local-label { max-width: 130px; font-size: 12px; }
   .page-wrap { width: calc(100% - 26px); padding: 24px 0 18px; }
   .welcome-row h1 { font-size: 31px; }
@@ -328,4 +338,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   .empty-recipe-card .button { margin-left: 56px; }
   .confirm-dialog { padding: 22px 17px 17px; }
   .dialog-actions { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+  .button:hover:not(:disabled) { transform: none; }
 }

@@ -1,7 +1,9 @@
 import type { Client as McpClient } from "@modelcontextprotocol/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
+import type { ZodType } from "zod/v4";
 import {
+  AddShoppingInputSchema,
   AddShoppingResultSchema,
   CancelReminderInputSchema,
   ChangePreviewInputSchema,
@@ -28,8 +30,8 @@ import type {
 } from "../shared/types.js";
 
 type ConnectionStatus = "connecting" | "connected" | "error";
-type RpcPayload = { method?: string; id?: number | string; params?: Record<string, unknown> };
-type TraceEntry = { id: number; method: string; request: string; response: string; status: number | null; elapsed: number; error?: string };
+type RpcPayload = { method?: string; id?: number | string; params?: Record<string, unknown>; result?: { isError?: boolean }; error?: unknown };
+type TraceEntry = { id: number; method: string; request: string; response: string; status: number | null; elapsed: number; failed?: boolean; error?: string };
 type SearchForm = { servings: string; maxPrepMinutes: string; diet: Diet };
 type SearchQuery = { servings: number; maxPrepMinutes: number; diet: Diet };
 type WriteToolName = "add_to_shopping_list" | "set_prep_reminder" | "mark_item_bought" | "remove_shopping_item" | "mark_cooked" | "set_pantry_item" | "cancel_prep_reminder";
@@ -43,6 +45,14 @@ type ConversationMessage = { id: number; role: "user" | "assistant"; text: strin
 
 const DEFAULT_QUERY: SearchQuery = { servings: 2, maxPrepMinutes: 25, diet: "vegetarian" };
 const INITIAL_FORM: SearchForm = { servings: "2", maxPrepMinutes: "25", diet: "vegetarian" };
+const RECIPE_EMOJIS: Record<string, string> = {
+  "coconut-chickpea-curry": "🥘",
+  "tomato-butter-beans": "🍲",
+  "chickpea-tacos": "🌮",
+  "lemon-spinach-pasta": "🍝",
+  "pea-coconut-dal": "🥣",
+  "halloumi-couscous-bowl": "🥗",
+};
 const REQUIRED_TOOLS = [
   "get_pantry", "find_recipes", "preview_change", "add_to_shopping_list", "set_prep_reminder",
   "mark_item_bought", "remove_shopping_item", "mark_cooked", "set_pantry_item", "cancel_prep_reminder",
@@ -60,6 +70,15 @@ const OUTPUT_SCHEMAS = {
   cancel_prep_reminder: ChangeResultSchema,
 };
 type ToolName = keyof typeof OUTPUT_SCHEMAS;
+const WRITE_INPUT_SCHEMAS: Record<WriteToolName, ZodType> = {
+  add_to_shopping_list: AddShoppingInputSchema,
+  set_prep_reminder: SetReminderInputSchema,
+  mark_item_bought: ItemChangeInputSchema,
+  remove_shopping_item: ItemChangeInputSchema,
+  mark_cooked: CookInputSchema,
+  set_pantry_item: SetPantryInputSchema,
+  cancel_prep_reminder: CancelReminderInputSchema,
+};
 type ToolOutput<T extends ToolName> =
   T extends "get_pantry" ? PantryResult :
   T extends "find_recipes" ? { recipes: RecipeMatch[] } :
@@ -80,14 +99,34 @@ function formatTime(dateString: string): string {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(dateString));
 }
 
-function shortJson(value: unknown): string {
-  try { return JSON.stringify(value); } catch { return String(value); }
+function formatTracePayload(value: unknown): string {
+  let formatted: string;
+  try { formatted = JSON.stringify(value, null, 2); } catch { formatted = String(value); }
+  if (formatted.length <= 1600) return formatted;
+  const lines: string[] = [];
+  let length = 0;
+  for (const line of formatted.split("\n")) {
+    if (length + line.length + 1 > 1500) break;
+    lines.push(line);
+    length += line.length + 1;
+  }
+  return lines.join("\n") + "\n… (truncated)";
+}
+
+function parseRpcPayload(raw: string): RpcPayload | null {
+  const data = raw.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim());
+  const source = data.length ? data.join("\n") : raw;
+  try {
+    const parsed: unknown = JSON.parse(source);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as RpcPayload : null;
+  } catch {
+    return null;
+  }
 }
 
 function getRpcText(raw: string): string {
-  const data = raw.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim());
-  const source = data.length ? data.join("\n") : raw;
-  try { return JSON.stringify(JSON.parse(source)); } catch { return source.trim().slice(0, 1500); }
+  const parsed = parseRpcPayload(raw);
+  return parsed ? formatTracePayload(parsed) : raw.trim().slice(0, 1500) + (raw.trim().length > 1500 ? "\n… (truncated)" : "");
 }
 
 async function readToolResult<T extends ToolName>(client: McpClient, name: T, args: Record<string, unknown>): Promise<ToolOutput<T>> {
@@ -122,11 +161,15 @@ function validateQuery(form: SearchForm): { query?: SearchQuery; errors: { servi
 
 function App() {
   const clientRef = useRef<McpClient | null>(null);
+  const connectGeneration = useRef(0);
   const traceCounter = useRef(0);
   const messageCounter = useRef(1);
   const previousFocus = useRef<HTMLElement | null>(null);
   const firstDialogButton = useRef<HTMLButtonElement | null>(null);
   const conversationInput = useRef<HTMLInputElement | null>(null);
+  const recipeHeading = useRef<HTMLHeadingElement | null>(null);
+  const householdTrigger = useRef<HTMLButtonElement | null>(null);
+  const householdMenu = useRef<HTMLDivElement | null>(null);
 
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -149,6 +192,7 @@ function App() {
   const [reminderDelay, setReminderDelay] = useState(20);
   const [pantryAmounts, setPantryAmounts] = useState<Record<string, string>>({});
   const [householdMenuOpen, setHouseholdMenuOpen] = useState(false);
+  const [dismissedDueReminderIds, setDismissedDueReminderIds] = useState<string[]>([]);
   const [clock, setClock] = useState(Date.now());
 
   const addTrace = useCallback((entry: Omit<TraceEntry, "id">) => {
@@ -157,11 +201,14 @@ function App() {
   }, []);
 
   const connect = useCallback(async () => {
+    const generation = ++connectGeneration.current;
+    const isCurrent = () => generation === connectGeneration.current;
     setStatus("connecting");
     setConnectionError(null);
     const previous = clientRef.current;
     clientRef.current = null;
     if (previous) await previous.close().catch(() => undefined);
+    if (!isCurrent()) return;
 
     const tracedFetch: typeof fetch = async (input, init) => {
       const started = performance.now();
@@ -177,25 +224,29 @@ function App() {
         const response = await window.fetch(input, init);
         responseStatus = response.status;
         if (payload?.method) {
-          responseText = getRpcText(await response.clone().text());
+          const rawResponse = await response.clone().text();
+          const rpcResponse = parseRpcPayload(rawResponse);
+          responseText = getRpcText(rawResponse);
           const toolName = payload.method === "tools/call" && typeof payload.params?.name === "string" ? " → " + payload.params.name : "";
-          addTrace({
-            method: rpcMethod + toolName,
-            request: shortJson(payload).slice(0, 1600),
-            response: responseText || response.statusText || "(empty response)",
-            status: responseStatus,
-            elapsed: Math.round(performance.now() - started),
-          });
+          if (isCurrent()) addTrace({
+              method: rpcMethod + toolName,
+              request: formatTracePayload(payload),
+              response: responseText || response.statusText || "(empty response)",
+              status: responseStatus,
+              elapsed: Math.round(performance.now() - started),
+              failed: response.status >= 400 || Boolean(rpcResponse && (rpcResponse.error !== undefined || rpcResponse.result?.isError === true)),
+            });
         }
         return response;
       } catch (error) {
         const message = error instanceof Error ? error.message : "Network request failed.";
-        if (payload?.method) addTrace({
+        if (payload?.method && isCurrent()) addTrace({
           method: rpcMethod,
-          request: shortJson(payload).slice(0, 1600),
+          request: formatTracePayload(payload),
           response: "",
           status: responseStatus,
           elapsed: Math.round(performance.now() - started),
+          failed: true,
           error: message,
         });
         throw error;
@@ -204,6 +255,7 @@ function App() {
 
     try {
       const { Client, StreamableHTTPClientTransport } = await import("@modelcontextprotocol/client");
+      if (!isCurrent()) return;
       const client = new Client(
         { name: "tableready-browser", version: "1.1.0" },
         { versionNegotiation: { mode: "legacy" }, supportedProtocolVersions: [MCP_PROTOCOL_VERSION] },
@@ -211,17 +263,24 @@ function App() {
       const transport = new StreamableHTTPClientTransport(new URL("/mcp", window.location.origin), { fetch: tracedFetch });
       clientRef.current = client;
       await client.connect(transport);
+      if (!isCurrent()) {
+        await client.close().catch(() => undefined);
+        return;
+      }
       const tools = await client.listTools();
       const names = tools.tools.map((tool) => tool.name);
       const missing = REQUIRED_TOOLS.filter((name) => !names.includes(name));
       if (missing.length) throw new Error("The MCP server is missing required tools: " + missing.join(", ") + ".");
       const pantry = await readToolResult(client, "get_pantry", {});
+      if (!isCurrent()) return;
       setState(pantry);
       const firstSearch = await readToolResult(client, "find_recipes", DEFAULT_QUERY);
+      if (!isCurrent()) return;
       setRecipes(firstSearch.recipes);
       setSelectedIndex(0);
       setStatus("connected");
     } catch (error) {
+      if (!isCurrent()) return;
       await clientRef.current?.close().catch(() => undefined);
       clientRef.current = null;
       setConnectionError(error instanceof Error ? error.message : "Could not connect to the local MCP server.");
@@ -231,7 +290,10 @@ function App() {
 
   useEffect(() => {
     void connect();
-    return () => { void clientRef.current?.close().catch(() => undefined); };
+    return () => {
+      connectGeneration.current += 1;
+      void clientRef.current?.close().catch(() => undefined);
+    };
   }, [connect]);
 
   useEffect(() => {
@@ -243,9 +305,9 @@ function App() {
   const upcomingReminder = useMemo(() => (state?.reminders ?? [])
     .filter((reminder) => new Date(reminder.scheduledAt).getTime() > clock)
     .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt))[0] ?? null, [clock, state]);
-  const dueReminder = useMemo(() => (state?.reminders ?? [])
-    .filter((reminder) => new Date(reminder.scheduledAt).getTime() <= clock)
-    .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt))[0] ?? null, [clock, state]);
+  const dueReminders = useMemo(() => (state?.reminders ?? [])
+    .filter((reminder) => new Date(reminder.scheduledAt).getTime() <= clock && !dismissedDueReminderIds.includes(reminder.id))
+    .sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt)), [clock, state, dismissedDueReminderIds]);
   const pantryItems = state?.items ?? [];
   const availableCount = pantryItems.filter((item) => item.amount > 0).length;
   const connected = status === "connected";
@@ -257,7 +319,7 @@ function App() {
     setMessages((previous) => [...previous, { id: messageCounter.current, role, text, card }].slice(-16));
   };
 
-  const performSearch = async (nextForm: SearchForm, preserveFormErrors = false) => {
+  const performSearch = async (nextForm: SearchForm) => {
     const validated = validateQuery(nextForm);
     setFormErrors(validated.errors);
     if (!validated.query) return null;
@@ -274,7 +336,7 @@ function App() {
       setQuery(validated.query);
       setRecipes(result.recipes);
       setSelectedIndex(0);
-      if (!preserveFormErrors) setFormErrors({});
+      setFormErrors({});
       return result.recipes;
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "The dinner search failed. Try again.");
@@ -294,6 +356,7 @@ function App() {
 
   const refreshAfterMutation = async (nextState: PantryResult) => {
     setState(nextState);
+    setPantryAmounts({});
     if (!clientRef.current) return;
     const results = await readToolResult(clientRef.current, "find_recipes", query);
     setRecipes(results.recipes);
@@ -331,9 +394,36 @@ function App() {
 
   useEffect(() => {
     if (dialog) firstDialogButton.current?.focus();
-    else if (previousFocus.current?.isConnected) previousFocus.current.focus();
-    else conversationInput.current?.focus();
+    else {
+      const trigger = previousFocus.current;
+      previousFocus.current = null;
+      const enabled = trigger?.isConnected
+        && !trigger.matches(":disabled")
+        && trigger.getAttribute("aria-disabled") !== "true";
+      if (trigger && enabled) trigger.focus();
+      else if (recipeHeading.current?.isConnected) recipeHeading.current.focus();
+      else conversationInput.current?.focus();
+    }
   }, [dialog]);
+
+  useEffect(() => {
+    if (!householdMenuOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!householdMenu.current?.contains(event.target as Node)) setHouseholdMenuOpen(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setHouseholdMenuOpen(false);
+        householdTrigger.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [householdMenuOpen]);
 
   const closeDialog = () => { if (!busy) setDialog(null); };
 
@@ -357,48 +447,44 @@ function App() {
   };
 
   const confirmChange = async () => {
-    if (!dialog || !clientRef.current) return;
+    const pending = dialog;
+    const client = clientRef.current;
+    if (!pending || !client) return;
     setBusy(true);
     setActionError(null);
     try {
-      const args = { ...dialog.args, confirmationToken: dialog.preview.confirmationToken };
-      if (dialog.tool === "add_to_shopping_list") {
-        const output = await readToolResult(clientRef.current, dialog.tool, AddShoppingResultSchema.parse(args));
-        await refreshAfterMutation(output.state);
-        const message = output.added.length + (output.added.length === 1 ? " item was added to your list." : " items were added to your list.");
-        setNotice(message);
-        addMessage("assistant", "Done. " + message);
-      } else if (dialog.tool === "set_prep_reminder") {
-        const output = await readToolResult(clientRef.current, dialog.tool, SetReminderInputSchema.parse(args));
-        await refreshAfterMutation(output.state);
-        const message = "I'll remind you at " + formatTime(output.reminder.scheduledAt) + ". It will appear here in the local demo.";
-        setNotice(message);
-        addMessage("assistant", message);
-      } else if (dialog.tool === "mark_item_bought" || dialog.tool === "remove_shopping_item") {
-        const output = await readToolResult(clientRef.current, dialog.tool, ItemChangeInputSchema.parse(args));
-        await refreshAfterMutation(output.state);
-        setNotice(output.message);
-        addMessage("assistant", output.message);
-      } else if (dialog.tool === "mark_cooked") {
-        const output = await readToolResult(clientRef.current, dialog.tool, CookInputSchema.parse(args));
-        await refreshAfterMutation(output.state);
-        setNotice(output.message);
-        addMessage("assistant", output.message);
-      } else if (dialog.tool === "set_pantry_item") {
-        const output = await readToolResult(clientRef.current, dialog.tool, SetPantryInputSchema.parse(args));
-        await refreshAfterMutation(output.state);
-        setPantryAmounts({});
-        setNotice(output.message);
-        addMessage("assistant", output.message);
+      const args = { ...pending.args, confirmationToken: pending.preview.confirmationToken };
+      const checkedArgs = WRITE_INPUT_SCHEMAS[pending.tool].parse(args) as Record<string, unknown>;
+      let nextState: PantryResult;
+      let message: string;
+      if (pending.tool === "add_to_shopping_list") {
+        const output = await readToolResult(client, pending.tool, checkedArgs);
+        nextState = output.state;
+        message = output.added.length + (output.added.length === 1 ? " item was added to your list." : " items were added to your list.");
+      } else if (pending.tool === "set_prep_reminder") {
+        const output = await readToolResult(client, pending.tool, checkedArgs);
+        nextState = output.state;
+        message = "I'll remind you at " + formatTime(output.reminder.scheduledAt) + ". It will appear here in the local demo.";
       } else {
-        const output = await readToolResult(clientRef.current, dialog.tool, CancelReminderInputSchema.parse(args));
-        await refreshAfterMutation(output.state);
-        setNotice(output.message);
-        addMessage("assistant", output.message);
+        const output = await readToolResult(client, pending.tool, checkedArgs);
+        nextState = output.state;
+        message = output.message;
       }
+
       setDialog(null);
+      setNotice(message);
+      addMessage("assistant", "Done. " + message);
+      try {
+        await refreshAfterMutation(nextState);
+      } catch (error) {
+        const reason = error instanceof Error ? " " + error.message : "";
+        const refreshMessage = "Saved, but couldn't refresh recipes." + reason;
+        setNotice(refreshMessage);
+        addMessage("assistant", refreshMessage);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "The change could not be saved. Review it and try again.";
+      setDialog(null);
       setActionError(message);
       addMessage("assistant", message);
     } finally {
@@ -490,92 +576,106 @@ function App() {
     if (/\bvegan\b|plant[- ]based/.test(normalized)) nextForm.diet = "vegan";
     else if (/\bvegetarian\b/.test(normalized)) nextForm.diet = "vegetarian";
 
-    if (/add|shopping|missing|buy/.test(normalized)) {
-      if (!currentRecipe) {
-        addMessage("assistant", "Run a dinner search first and I can add its missing ingredients.");
+    try {
+      if (/\bremind(?:er)?\b/.test(normalized)) {
+        const delay = Number(minutesMatch?.[1] ?? reminderDelay);
+        if (delay < 5 || delay > 180) {
+          addMessage("assistant", "I can set a local reminder from 5 to 180 minutes from now.");
+          return;
+        }
+        if (!currentRecipe) {
+          addMessage("assistant", "Search for a dinner idea first, and I can set its reminder.");
+          return;
+        }
+        addMessage("assistant", "I can save a local preparation reminder. Please review the time before I save it.");
+        startReminderConfirmation(currentRecipe, delay, conversationInput.current);
         return;
       }
-      const needs = currentRecipe.ingredients.filter((item) => item.toBuyAmount > 0);
-      if (!needs.length) {
-        addMessage("assistant", "Everything missing is already on your list, or the pantry has it.");
+      if (/\b(bought|picked up|got the groceries)\b/.test(normalized)) {
+        const waiting = (state?.shoppingList ?? []).filter((item) => !item.checked);
+        const namedItem = waiting.find((item) => normalized.includes(item.name.toLocaleLowerCase()));
+        const item = namedItem ?? waiting[0];
+        if (!item) {
+          addMessage("assistant", "There are no unchecked items on your shopping list.");
+          return;
+        }
+        addMessage("assistant", "I can mark " + item.name + " bought and add it to the pantry. Please confirm.");
+        previewItemAction("mark_item_bought", item.id, conversationInput.current);
         return;
       }
-      addMessage("assistant", "I’ve checked what is still needed. Please review the amounts before I save them.", needs.map((item) => item.name + " · " + quantity(item.toBuyAmount, item.unit)).join("  |  "));
-      startShoppingConfirmation(currentRecipe, conversationInput.current);
-      return;
-    }
-    if (/remind|reminder/.test(normalized)) {
-      const delay = Number(minutesMatch?.[1] ?? reminderDelay);
-      if (delay < 5 || delay > 180) {
-        addMessage("assistant", "I can set a local reminder from 5 to 180 minutes from now.");
+      if (/\b(cook|cooked|made it|finished dinner)\b/.test(normalized)) {
+        if (!currentRecipe) {
+          addMessage("assistant", "Choose a recipe first so I know which ingredients to deduct.");
+          return;
+        }
+        submitCooked(currentRecipe, conversationInput.current);
         return;
       }
-      if (!currentRecipe) {
-        addMessage("assistant", "Search for a dinner idea first, and I can set its reminder.");
+      if (/\b(remove|delete)\b/.test(normalized)) {
+        const item = (state?.shoppingList ?? []).find((candidate) => normalized.includes(candidate.name.toLocaleLowerCase()));
+        if (!item) {
+          addMessage("assistant", "Tell me the name of a shopping-list item to remove.");
+          return;
+        }
+        previewItemAction("remove_shopping_item", item.id, conversationInput.current);
         return;
       }
-      addMessage("assistant", "I can save a local preparation reminder. Please review the time before I save it.");
-      startReminderConfirmation(currentRecipe, delay, conversationInput.current);
-      return;
-    }
-    if (/bought|picked up|got the grocer/.test(normalized)) {
-      const waiting = (state?.shoppingList ?? []).filter((item) => !item.checked);
-      const namedItem = waiting.find((item) => normalized.includes(item.name.toLocaleLowerCase()));
-      const item = namedItem ?? waiting[0];
-      if (!item) {
-        addMessage("assistant", "There are no unchecked items on your shopping list.");
-        return;
-      }
-      addMessage("assistant", "I can mark " + item.name + " bought and add it to the pantry. Please confirm.");
-      previewItemAction("mark_item_bought", item.id, conversationInput.current);
-      return;
-    }
-    if (/cook|made it|finished dinner/.test(normalized)) {
-      if (!currentRecipe) {
-        addMessage("assistant", "Choose a recipe first so I know which ingredients to deduct.");
-        return;
-      }
-      submitCooked(currentRecipe, conversationInput.current);
-      return;
-    }
-    if (/remove|delete/.test(normalized)) {
-      const item = (state?.shoppingList ?? []).find((candidate) => normalized.includes(candidate.name.toLocaleLowerCase()));
-      if (!item) {
-        addMessage("assistant", "Tell me the name of a shopping-list item to remove.");
-        return;
-      }
-      previewItemAction("remove_shopping_item", item.id, conversationInput.current);
-      return;
-    }
-    if (/pantry/.test(normalized) && /(set|update|change|to|=)/.test(normalized)) {
-      const amountMatch = normalized.match(/(?:to|=)\s*(\d+(?:\.\d+)?)/);
-      const item = pantryItems.find((candidate) => normalized.includes(candidate.name.toLocaleLowerCase()));
-      if (!item || !amountMatch?.[1]) {
-        addMessage("assistant", "Say something like “set Chickpeas to 2” and I’ll prepare the pantry update for confirmation.");
-        return;
-      }
-      submitPantryAmount(item.id, Number(amountMatch[1]), conversationInput.current);
-      return;
-    }
-    if (/pantry|what do i have|what's in/.test(normalized)) {
-      if (clientRef.current) {
+
+      const pantryRead = /\b(what do i have|what(?:['’]s| is) in|show|list)\b/.test(normalized)
+        && /\b(pantry|ingredients|food)\b/.test(normalized);
+      if (pantryRead) {
+        if (!clientRef.current) throw new Error("Connect to the local MCP server before reading the pantry.");
         const result = await readToolResult(clientRef.current, "get_pantry", {});
         setState(result);
         addMessage("assistant", "You have " + result.items.filter((item) => item.amount > 0).length + " stocked pantry items and " + result.shoppingList.filter((item) => !item.checked).length + " things to pick up.", result.items.filter((item) => item.amount > 0).map((item) => item.name + " · " + quantity(item.amount, item.unit)).join("  |  "));
+        document.getElementById("pantry")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
       }
-      document.getElementById("pantry")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      return;
-    }
-    if (/find|dinner|recipe|eat|what.*make|vegan|vegetarian|minute/.test(normalized)) {
-      if (nextForm.diet !== form.diet || nextForm.maxPrepMinutes !== form.maxPrepMinutes || nextForm.servings !== form.servings) setForm(nextForm);
-      const results = await performSearch(nextForm);
-      if (results) {
-        const top = results[0];
-        addMessage("assistant", top ? "Here are " + results.length + " ideas. " + top.name + " is the closest pantry match." : "I couldn't find a matching dinner in that time. Try more minutes or switch the diet filter.", top ? top.name + " · " + top.prepMinutes + " min · " + top.pantryMatchCount + " pantry matches" : "You can change the time and search again.");
+
+      const amountMatch = normalized.match(/\b(?:to|=)\s*(\d+(?:\.\d+)?)/);
+      const namedPantryItem = pantryItems.find((candidate) => normalized.includes(candidate.name.toLocaleLowerCase()));
+      const pantryEditIntent = (/\bpantry\b/.test(normalized) && /\b(set|update|change)\b/.test(normalized))
+        || (Boolean(namedPantryItem && amountMatch) && /\b(set|update|change)\b/.test(normalized));
+      if (pantryEditIntent) {
+        if (!namedPantryItem || !amountMatch?.[1]) {
+          addMessage("assistant", "Say something like 'set Chickpeas to 2' and I will prepare the pantry update for confirmation.");
+          return;
+        }
+        submitPantryAmount(namedPantryItem.id, Number(amountMatch[1]), conversationInput.current);
+        return;
       }
-      return;
+
+      if (/\b(add|missing|buy)\b|\bshopping list\b/.test(normalized)) {
+        if (!currentRecipe) {
+          addMessage("assistant", "Run a dinner search first and I can add its missing ingredients.");
+          return;
+        }
+        const needs = currentRecipe.ingredients.filter((item) => item.toBuyAmount > 0);
+        if (!needs.length) {
+          addMessage("assistant", "Everything missing is already on your list, or the pantry has it.");
+          return;
+        }
+        addMessage("assistant", "I have checked what is still needed. Please review the amounts before I save them.", needs.map((item) => item.name + " · " + quantity(item.toBuyAmount, item.unit)).join("  |  "));
+        startShoppingConfirmation(currentRecipe, conversationInput.current);
+        return;
+      }
+      if (/\b(find|dinner|recipe|eat|vegan|vegetarian|minutes?)\b|what.*make/.test(normalized)) {
+        const results = await performSearch(nextForm);
+        if (results) {
+          const top = results[0];
+          addMessage("assistant", top ? "Here are " + results.length + " ideas. " + top.name + " is the closest pantry match." : "I could not find a matching dinner in that time. Try more minutes or switch the diet filter.", top ? top.name + " · " + top.prepMinutes + " min · " + top.pantryMatchCount + " pantry matches" : "You can change the time and search again.");
+        } else {
+          const validationMessage = Object.values(validateQuery(nextForm).errors).join(" ");
+          addMessage("assistant", validationMessage || actionError || "The dinner search failed. Try again.");
+        }
+        return;
+      }
+      addMessage("assistant", "I can find vegan or vegetarian dinner, add missing ingredients, set a reminder, mark shopping as bought, update the pantry, or mark a meal cooked.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "I could not complete that request. Try again.";
+      setActionError(message);
+      addMessage("assistant", message);
     }
-    addMessage("assistant", "I can find vegan or vegetarian dinner, add missing ingredients, set a reminder, mark shopping as bought, update the pantry, or mark a meal cooked.");
   };
 
   const handleConversationSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -606,10 +706,10 @@ function App() {
             <a href="#pantry">My pantry</a>
             <a href="#conversation">Ask TableReady</a>
           </nav>
-          <div className="topbar-right">
+          <div className="topbar-right" ref={householdMenu}>
             <span className="local-label"><span className="local-dot" /> Local simulation</span>
-            <button className="avatar" type="button" aria-label="Open demo household menu" aria-haspopup="true" aria-expanded={householdMenuOpen} onClick={() => setHouseholdMenuOpen((open) => !open)}>H</button>
-            {householdMenuOpen && <div className="household-menu" role="status"><strong>Demo household</strong><span>Saved locally on this computer.</span></div>}
+            <button ref={householdTrigger} className="avatar" type="button" aria-label="Demo household information" aria-controls="household-menu" aria-expanded={householdMenuOpen} onClick={() => setHouseholdMenuOpen((open) => !open)}>H</button>
+            {householdMenuOpen && <div id="household-menu" className="household-menu"><strong>Demo household</strong><span>Saved locally on this computer.</span></div>}
           </div>
         </header>
 
@@ -629,7 +729,7 @@ function App() {
           {status === "error" && <div className="alert-banner" role="alert"><div><strong>Couldn’t reach your local dinner planner.</strong><span>{connectionError}</span></div><button className="button button-outline" type="button" onClick={() => void connect()}>Try again</button></div>}
           {actionError && <div className="alert-banner action-alert" role="alert"><span>{actionError}</span><button type="button" className="plain-close" onClick={() => setActionError(null)} aria-label="Dismiss error">×</button></div>}
           {notice && <div className="success-banner" role="status"><span aria-hidden="true">✓</span><span>{notice}</span><button type="button" className="plain-close" onClick={() => setNotice(null)} aria-label="Dismiss message">×</button></div>}
-          {dueReminder && <div className="due-banner" role="status"><span aria-hidden="true">⏰</span><div><strong>Time to start cooking</strong><span>{dueReminder.recipeName} reminder is due.</span></div><button className="button button-outline" type="button" onClick={(event) => previewCancelReminder(dueReminder.id, event.currentTarget)}>Clear reminder</button></div>}
+          {dueReminders.length > 0 && <div className="due-banner" role="status"><span aria-hidden="true">&#9200;</span><div><strong>Reminders due</strong><div className="due-reminder-list">{dueReminders.map((reminder) => <div className="due-reminder-item" key={reminder.id}><span>{reminder.recipeName} reminder is due.</span><button type="button" className="text-button" onClick={() => setDismissedDueReminderIds((items) => [...items, reminder.id])}>Dismiss</button><button type="button" className="text-button" onClick={(event) => previewCancelReminder(reminder.id, event.currentTarget)}>Cancel</button></div>)}</div></div></div>}
 
           <div className="main-grid">
             <div className="primary-column">
@@ -656,14 +756,14 @@ function App() {
                   <p className="planner-footnote">Made from what you have, with room to improvise.</p>
                 </div>
                 <div className="planner-art-wrap">
-                  {currentRecipe ? <div className="planner-art" role="img" aria-label={"Illustration of " + currentRecipe.name}><span aria-hidden="true">🥘</span></div> : <div className="planner-art" aria-hidden="true"><span>🥣</span></div>}
+                  {currentRecipe ? <div className="planner-art" role="img" aria-label={"Illustration of " + currentRecipe.name}><span aria-hidden="true">{RECIPE_EMOJIS[currentRecipe.id] ?? "🍽️"}</span></div> : <div className="planner-art" aria-hidden="true"><span>🥣</span></div>}
                   <div className="art-tag"><strong>{currentRecipe ? currentRecipe.prepMinutes + " minutes" : "A fresh idea"}</strong><span>{currentRecipe?.diet === "vegan" ? "Plant-based dinner" : "Simple dinner, ready soon"}</span></div>
                 </div>
               </section>
 
-              <section className="recipe-section" aria-labelledby="recipe-heading" aria-live="polite" aria-busy={searching}>
+              <section className="recipe-section" aria-labelledby="recipe-heading" aria-busy={searching}>
                 <div className="section-heading-row">
-                  <div><p className="eyebrow">MADE FOR YOUR EVENING</p><h2 id="recipe-heading">Your dinner ideas</h2></div>
+                  <div><p className="eyebrow">MADE FOR YOUR EVENING</p><h2 ref={recipeHeading} id="recipe-heading" tabIndex={-1}>Your dinner ideas</h2></div>
                   {recipes.length > 0 && <div className="carousel-controls"><button type="button" className="button button-small button-outline" onClick={() => selectRecipe(selectedIndex - 1)} aria-label="Previous recipe">←</button><span>{selectedIndex + 1} of {recipes.length}</span><button type="button" className="button button-small button-outline" onClick={() => selectRecipe(selectedIndex + 1)} aria-label="Next recipe">→</button></div>}
                 </div>
                 <p className="sr-only" role="status">{searchAnnouncement}</p>
@@ -679,16 +779,18 @@ function App() {
                         {currentRecipe.ingredients.map((ingredient) => {
                           const unavailable = ingredient.missingAmount > 0 && ingredient.toBuyAmount > 0;
                           const listed = ingredient.missingAmount > 0 && ingredient.toBuyAmount === 0;
+                          const unitMismatch = pantryItems.find((item) => item.name.trim().toLocaleLowerCase() === ingredient.name.trim().toLocaleLowerCase() && item.unit !== ingredient.unit);
                           return <li className={unavailable ? "is-missing" : "is-available"} key={ingredient.name}>
                             <span className="ingredient-status" aria-hidden="true">{unavailable ? "+" : "✓"}</span>
                             <span className="ingredient-name">{ingredient.name}</span>
-                            <span className="ingredient-amount">{unavailable ? <><strong>{quantity(ingredient.toBuyAmount, ingredient.unit)}</strong> to get</> : listed ? <><strong>{quantity(ingredient.shoppingAmount, ingredient.unit)}</strong> on your list</> : quantity(ingredient.amount, ingredient.unit)}</span>
+                            <span className="ingredient-amount">{unavailable ? <><strong>{quantity(ingredient.toBuyAmount, ingredient.unit)}</strong> to get</> : listed ? <><strong>{quantity(ingredient.shoppingAmount, ingredient.unit)}</strong> on your list</> : quantity(ingredient.amount, ingredient.unit)}{unitMismatch && <small className="ingredient-unit-note">Pantry has {quantity(unitMismatch.amount, unitMismatch.unit)}; this demo matches exact units.</small>}</span>
                           </li>;
                         })}
                       </ul>
                       {toBuy.length > 0 ? <div className="missing-note"><strong>Still needed:</strong> {toBuy.map((item) => item.name).join(", ")}.</div> : missing.length > 0 ? <div className="all-here-note">✓ Everything missing is already on your list.</div> : <div className="all-here-note">✓ You have everything for this recipe.</div>}
                       <div className="recipe-actions">
                         <button className="button button-primary" type="button" onClick={(event) => startShoppingConfirmation(currentRecipe, event.currentTarget)} disabled={!connected || toBuy.length === 0}>{toBuy.length ? "Add remaining items" : missing.length ? "On your list ✓" : "In your pantry ✓"}</button>
+                        <label className="reminder-inline" htmlFor="reminder-delay">Reminder in <select id="reminder-delay" value={reminderDelay} onChange={(event) => setReminderDelay(Number(event.target.value))}>{[5, 10, 15, 20, 30, 45, 60, 90, 120, 180].map((minutes) => <option value={minutes} key={minutes}>{minutes} min</option>)}</select></label>
                         <button className="button button-outline" type="button" onClick={(event) => startReminderConfirmation(currentRecipe, reminderDelay, event.currentTarget)} disabled={!connected}>Set reminder</button>
                         <button className="button button-outline" type="button" onClick={(event) => submitCooked(currentRecipe, event.currentTarget)} disabled={!connected || missing.length > 0}>Mark cooked</button>
                       </div>
@@ -720,7 +822,7 @@ function App() {
                   <button type="button" onClick={() => void runUtterance("Add what I’m missing")}>Add what I’m missing</button>
                   <button type="button" onClick={() => void runUtterance("Remind me in " + reminderDelay + " minutes")}>Remind me in {reminderDelay} min</button>
                 </div>
-                <div className="reminder-delay-row"><label htmlFor="reminder-delay">Default reminder delay</label><select id="reminder-delay" value={reminderDelay} onChange={(event) => setReminderDelay(Number(event.target.value))}>{[5, 10, 15, 20, 30, 45, 60, 90, 120, 180].map((minutes) => <option value={minutes} key={minutes}>{minutes} minutes</option>)}</select></div>
+
               </section>
 
               <section id="mcp-trace" className="trace-card" aria-labelledby="trace-title">
@@ -730,7 +832,7 @@ function App() {
                   {trace.map((entry) => <li key={entry.id} className="trace-row">
                     <span className="trace-index">{String(entry.id).padStart(2, "0")}</span>
                     <div className="trace-main"><div className="trace-line"><code>{entry.method}</code><span>{entry.elapsed} ms</span></div><details className="trace-details"><summary><span className="trace-http-dot" />{entry.status === null ? "network error" : "HTTP " + entry.status} · inspect payload</summary><div className="trace-payloads"><div><small>REQUEST</small><pre>{entry.request}</pre></div><div><small>RESPONSE</small><pre>{entry.error ?? entry.response}</pre></div></div></details></div>
-                    <span className={entry.error ? "trace-result trace-result-error" : "trace-result"} aria-label={entry.error ? "Error" : "Success"}>{entry.error ? "!" : "✓"}</span>
+                    <span className={entry.failed ? "trace-result trace-result-error" : "trace-result"} aria-label={entry.failed ? "Error" : "Success"}>{entry.failed ? "!" : "✓"}</span>
                   </li>)}
                   {!trace.length && <li className="trace-empty">Waiting for the MCP initialization handshake…</li>}
                 </ol>
@@ -786,14 +888,14 @@ function App() {
       {dialog && <div className="dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDialog(); }}>
         <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-description" onKeyDown={handleDialogKeyDown}>
           <button type="button" className="dialog-close" aria-label="Close confirmation" onClick={closeDialog} disabled={busy}>×</button>
-          <div className="dialog-mark" aria-hidden="true">{dialog.tool === "set_prep_reminder" ? "◷" : dialog.tool === "mark_cooked" ? "✓" : "＋"}</div>
-          <p className="eyebrow">ONE QUICK CHECK</p>
+          <div className="dialog-mark" aria-hidden="true">{dialog.tool === "remove_shopping_item" || dialog.tool === "cancel_prep_reminder" ? "!" : dialog.tool === "set_prep_reminder" ? "◷" : dialog.tool === "mark_cooked" ? "✓" : "+"}</div>
+          <p className="eyebrow">REVIEW THIS CHANGE</p>
           <h2 id="dialog-title">{dialog.label}?</h2>
           <p id="dialog-description" className="dialog-copy">{dialog.preview.summary}</p>
           {dialog.preview.items.length > 0 && <ul className="dialog-items">{dialog.preview.items.map((item) => <li key={item.name}><span>{item.name}</span><strong>{quantity(item.amount, item.unit)}</strong></li>)}</ul>}
-          <p className="dialog-copy">This preview is protected by a one-use token. Confirming here is required before the local server saves the change.</p>
+          <p className="dialog-copy">Review the details above. Confirm to save this change in the local demo.</p>
           {actionError && <p className="dialog-error" role="alert">{actionError}</p>}
-          <div className="dialog-actions"><button ref={firstDialogButton} className="button button-text" type="button" onClick={closeDialog} disabled={busy}>Not now</button><button className="button button-primary" type="button" onClick={() => void confirmChange()} disabled={busy}>{busy ? "Saving…" : "Confirm and save"}</button></div>
+          <div className="dialog-actions"><button ref={firstDialogButton} className="button button-text" type="button" onClick={closeDialog} disabled={busy}>Not now</button><button className={dialog.tool === "remove_shopping_item" || dialog.tool === "cancel_prep_reminder" ? "button button-danger" : "button button-primary"} type="button" onClick={() => void confirmChange()} disabled={busy}>{busy ? "Saving..." : dialog.tool === "remove_shopping_item" ? "Remove item" : dialog.tool === "cancel_prep_reminder" ? "Cancel reminder" : "Confirm and save"}</button></div>
         </div>
       </div>}
     </div>

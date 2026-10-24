@@ -66,4 +66,30 @@ describe("local store", () => {
     const chickpeas = current.pantry.find((item) => item.id === "chickpeas")!;
     await expect(store.preview({ action: "set_pantry_item", itemId: chickpeas.id, amount: 1.5 })).rejects.toThrow(/whole number/);
   });
+
+  it("keeps a preview token usable when the operation fails before persistence", async () => {
+    const state = await store.read();
+    const item = {
+      id: "lime-to-buy",
+      name: "Lime",
+      amount: 1,
+      unit: "each",
+      sourceRecipeId: "coconut-chickpea-curry",
+      checked: false,
+      createdAt: new Date().toISOString(),
+    };
+    state.shoppingList.push(item);
+    const path = join(root, "data/runtime-state.json");
+    await writeFile(path, JSON.stringify(state), "utf8");
+    const preview = await store.preview({ action: "mark_item_bought", itemId: item.id });
+
+    state.shoppingList[0]!.checked = true;
+    await writeFile(path, JSON.stringify(state), "utf8");
+    const commit = { action: "mark_item_bought" as const, itemId: item.id, confirmationToken: preview.confirmationToken };
+    await expect(store.markBought(commit)).rejects.toThrow(/no longer waiting/);
+
+    state.shoppingList[0]!.checked = false;
+    await writeFile(path, JSON.stringify(state), "utf8");
+    await expect(store.markBought(commit)).resolves.toMatchObject({ value: expect.stringContaining("Lime") });
+  });
 });

@@ -45,4 +45,19 @@ describe("recipe scaling and pantry matching", () => {
     expect(findRecipes(state, 2, 25, "vegan").every((recipe) => recipe.diet === "vegan")).toBe(true);
     expect(findRecipes(state, 2, 25, "vegetarian").some((recipe) => recipe.diet === "vegetarian")).toBe(true);
   });
+
+  it("does not credit one recipe's shopping row to another recipe", async () => {
+    const state = await seedState();
+    state.shoppingList.push({
+      id: "curry-lime",
+      name: "Lime",
+      amount: 1,
+      unit: "each",
+      sourceRecipeId: "coconut-chickpea-curry",
+      checked: false,
+      createdAt: new Date().toISOString(),
+    });
+    const tacos = buildRecipeMatch(state, "chickpea-tacos", 2);
+    expect(tacos.ingredients.find((ingredient) => ingredient.name === "Lime")?.toBuyAmount).toBe(1);
+  });
 });

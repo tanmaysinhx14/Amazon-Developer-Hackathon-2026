@@ -24,6 +24,8 @@ describe("MCP client/server integration", () => {
       const listed = await client.listTools();
       expect(listed.tools.map((tool) => tool.name)).toContain("mark_item_bought");
       expect(listed.tools.find((tool) => tool.name === "get_pantry")?.outputSchema).toBeDefined();
+      expect(listed.tools.every((tool) => tool.inputSchema.type === "object")).toBe(true);
+      expect(listed.tools.every((tool) => tool.annotations?.openWorldHint === false)).toBe(true);
       expect((await client.listResources()).resources.map((resource) => resource.uri)).toContain("pantry://current");
       expect((await client.listPrompts()).prompts.map((prompt) => prompt.name)).toContain("plan-tonight");
 

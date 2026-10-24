@@ -13,6 +13,7 @@ export {
   RecipeSearchResultSchema,
   MissingItemInputSchema,
   ChangePreviewInputSchema,
+  parseChangePreviewInput,
   ChangePreviewSchema,
   AddShoppingResultSchema,
   ReminderResultSchema,
@@ -37,7 +38,7 @@ export type RecipeIngredient = z.infer<typeof Schemas.RecipeIngredientSchema>;
 export type RecipeMatch = z.infer<typeof Schemas.RecipeMatchSchema>;
 export type Diet = z.infer<typeof Schemas.DietSchema>;
 export type MissingItemInput = z.infer<typeof Schemas.MissingItemInputSchema>;
-export type ChangePreviewInput = z.infer<typeof Schemas.ChangePreviewInputSchema>;
+export type ChangePreviewInput = Schemas.ChangePreviewInput;
 export type ChangePreview = z.infer<typeof Schemas.ChangePreviewSchema>;
 
 export type RecipeSearchResult = { recipes: RecipeMatch[] };

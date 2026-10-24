@@ -10,15 +10,15 @@ This is a **local Alexa+ simulation**. It does not connect to Alexa+, use an AI 
 
 1. On opening the app, the browser MCP client connects to the local /mcp endpoint, completes initialize, calls tools/list, then reads the pantry and searches the default recipe query.
 2. The user chooses servings (1–6), a maximum preparation time (5–120 minutes), and vegetarian or vegan. Defaults are two servings, 25 minutes, and vegetarian.
-3. find_recipes returns recipes within the time limit. Results are ranked by pantry-match count, then preparation time. Each result shows pantry stock, shopping-list coverage, and the amount still needed.
+3. find_recipes returns recipes within the time limit. Results are ranked by pantry-match ratio, then preparation time. Each result shows pantry stock, shopping-list coverage for that recipe, and the amount still needed.
 4. The recipe carousel shows one selected result at a time, with its recipe-authored description, scaled ingredients, and cooking steps. The user can move between alternatives.
-5. Before any saved change, preview_change returns a short-lived, one-use confirmation token and an exact summary. The browser shows that summary in a keyboard-accessible dialog. Only the matching write tool accepts that token. A token expires after ten minutes or after one use. Stale ingredient quantities are checked again inside the serialized write.
+5. Before any saved change, preview_change returns a short-lived, one-use token and an exact summary. The browser shows that summary in a keyboard-accessible dialog and asks the person to confirm. The token binds the preview to the write; it does not prove that a human approved the change. Other MCP clients must obtain that approval themselves. A token expires after ten minutes or after a successful write. Stale ingredient quantities are checked again inside the serialized write.
 6. Shopping items can be marked bought, which adds their quantities to the pantry, or removed. mark_cooked deducts the selected recipe's ingredients only when the pantry covers them. Pantry quantities can be set directly after confirmation.
-7. Reminder records are local data only. Show only the next future reminder in the “Up next” card. When one becomes due, show an in-page “Time to start cooking” banner; the user can clear it by cancelling the reminder. No reminder is delivered outside the page.
+7. Reminder records are local data only. Show only the next future reminder in the “Up next” card. When reminders become due, show all of them in an in-page banner; the user can dismiss each banner until the page reloads or cancel a reminder through the preview flow. No reminder is delivered outside the page.
 8. The conversation panel handles deterministic intents for recipe search, adding missing items, setting reminders, marking an item bought, removing a named item, reading the pantry, setting pantry quantities, and marking the selected recipe cooked. Every data change uses the same preview and write tools as the buttons.
 9. The household avatar opens a short local-data menu. “My pantry” links to the pantry editor.
 
-Persistent data changes always require a matching server-issued confirmation token. Canceling the dialog leaves saved data unchanged. Show success only after persistence completes. Return focus to the control that opened the dialog, trap Tab within it, and set the app background inert until it closes.
+Persistent data changes require a matching server-issued token. In the browser, the dialog is the human confirmation step; the token itself is only a preview-to-write guard. Canceling the dialog leaves saved data unchanged. Show success only after persistence completes. Return focus to the control that opened the dialog when it remains enabled, otherwise focus the recipe heading. Trap Tab within the dialog and set the app background inert until it closes.
 
 ## Required visible states
 
@@ -60,20 +60,20 @@ Every tool has a Zod input and output schema, a title, annotations, and object-s
 - Input: servings integer 1–6, maxPrepMinutes integer 5–120, and diet vegetarian or vegan.
 - Result: recipes with ID, name, description, diet, servings, prepMinutes, ingredients, steps, and pantryMatchCount.
 - Ingredients include name, amount, unit, pantryAmount, missingAmount, shoppingAmount, and toBuyAmount. Countable units (can, each, cloves) scale up with Math.ceil; measured units are rounded to two decimal places.
-- Vegetarian searches include vegan and vegetarian recipes. Vegan searches include only vegan recipes. The result list is ordered by number of fully matched ingredients, then preparation time.
+- Vegetarian searches include vegan and vegetarian recipes. Vegan searches include only vegan recipes. The result list is ordered by pantry-match ratio, then preparation time.
 - Does not change saved data.
 
 ### preview_change
 
-- Input is one of: add_to_shopping_list with recipeId and servings; set_prep_reminder with recipeId and delayMinutes; mark_item_bought with itemId; remove_shopping_item with itemId; mark_cooked with recipeId and servings; set_pantry_item with itemId and amount; or cancel_prep_reminder with reminderId.
+- Input is one flat object with an action and optional recipeId, servings, delayMinutes, itemId, amount, or reminderId fields. The server validates which fields are required for each action.
 - Result: confirmationToken, action, summary, and items.
-- Creates an in-memory, one-use token that expires in ten minutes. It does not update persisted state. A token is bound to the complete reviewed change and cannot authorize another action or amount.
+- Creates an in-memory, one-use token that expires in ten minutes. It does not update persisted household data. A token is bound to the complete reviewed change and cannot authorize another action or amount. It does not establish that a person approved the change.
 
 ### add_to_shopping_list
 
 - Input: confirmationToken, recipeId, servings, and items containing name, amount, and unit.
-- The server re-reads state inside its serialized write, checks that the token matches, then recalculates the exact remaining amounts as recipe shortfall minus unchecked shopping-list coverage. Stale or repeated requests fail without a second addition.
-- Result: state and added. Merge duplicate unchecked items by normalized name and unit.
+- The server re-reads state inside its serialized write, checks that the token matches, then recalculates the exact remaining amounts as recipe shortfall minus unchecked shopping-list rows tagged for that recipe. Stale or repeated requests fail without a second addition.
+- Result: state and added. Merge duplicate unchecked items by normalized name and unit; the added amount reports the new quantity only.
 
 ### set_prep_reminder
 
@@ -96,7 +96,7 @@ Every tool has a Zod input and output schema, a title, annotations, and object-s
 ### mark_cooked
 
 - Input: confirmationToken, recipeId, and servings.
-- Requires pantry stock for every scaled recipe ingredient, then deducts those ingredients in one atomic write.
+- Requires pantry stock for every scaled recipe ingredient, then deducts those ingredients in one atomic write. It also removes checked shopping rows for those ingredients that were tagged to this recipe.
 - Result: state and message.
 
 ### set_pantry_item
@@ -111,7 +111,9 @@ Every tool has a Zod input and output schema, a title, annotations, and object-s
 - Removes an existing local reminder.
 - Result: state and message.
 
-Read tools advertise readOnlyHint and idempotentHint. Persistent write tools advertise idempotentHint; removal tools also advertise destructiveHint. The server exposes the current pantry at pantry://current as JSON and the plan-tonight prompt for MCP clients.
+Read tools advertise readOnlyHint, idempotentHint, destructiveHint=false, and openWorldHint=false. preview_change is not read-only because it creates a process-local token. Write tools advertise openWorldHint=false and idempotentHint=false; removal and reminder-cancellation tools also advertise destructiveHint=true. The server exposes the current pantry at pantry://current as JSON and the plan-tonight prompt for MCP clients.
+
+The store resolves data relative to the project by default, even when the server starts from another working directory. TABLEREADY_DATA_DIR can point to a different state directory. Remote binding is refused unless ALLOW_REMOTE=1 is set.
 
 ## Seed recipes
 
@@ -134,21 +136,21 @@ Use concise, plausible cooking steps and no unlicensed third-party photos, logos
 - If runtime data is missing, initialize it from the seed. Writes use a same-directory temporary file followed by atomic rename.
 - Do not report a successful save until persistence completes. Keep the previous UI state on failed writes and show an actionable error.
 - If local JSON cannot be parsed, show a clear error and document npm run data:reset as the recovery path; do not silently overwrite the malformed file.
-- Confirmation tokens are process-local and expire after ten minutes. Restarting the server invalidates outstanding previews.
+- Confirmation tokens are process-local and expire after ten minutes. A reset in another process (npm run data:reset) cannot clear a running server's token map; those previews will fail after the state reset. Restarting the server also invalidates outstanding previews.
 - Keep local network access restricted to loopback. Do not accept user-controlled file paths or external URLs in tool input.
 - Do not include credentials, personal data, generated runtime JSON, or environment files in git.
 
 ## Tests and acceptance checks
 
-npm test covers recipe scaling and discrete-unit rounding, shopping shortfall validation, serialized concurrent writes, atomic JSON state, malformed JSON preservation, one-use confirmation, and an MCP client/server tool/resource/prompt round trip.
+npm test covers recipe scaling and discrete-unit rounding, shopping shortfall validation and recipe-scoped coverage, serialized concurrent writes, atomic JSON state, malformed JSON preservation, retrying a failed confirmation, one-use confirmation, object-shaped tool schemas, and an MCP client/server tool/resource/prompt round trip. A browser-level dialog smoke test is still outstanding.
 
 - npm run dev opens the local UI and shows initialize, tools/list, and get_pantry traffic in the trace.
-- The default search returns six vegetarian candidates, led by the seeded curry; its shortfalls remain 25 g spinach, 50 g rice, and one lime.
+- The default search returns six vegetarian candidates, ranked by pantry-match ratio; the curry shortfalls remain 25 g spinach, 50 g rice, and one lime.
 - A time limit below the shortest seeded recipe gives an accessible empty state; “Try 25 minutes” updates the form and immediately searches.
 - After adding current missing items, a repeated preview cannot inflate the list; once covered, the UI says “On your list”.
 - Direct write calls without a preview token, a mismatched token, an expired token, or a reused token do not persist changes.
 - Marking an item bought adds it to pantry once. Marking a sufficiently stocked recipe cooked deducts its ingredients. All writes survive reload.
-- Reminder cards show only future reminders, due reminders show an in-page banner, and cancelling removes the record.
+- Reminder cards show only the next future reminder; all due reminders appear in the banner and can be dismissed for the current page session or cancelled through the preview flow.
 - Text body is at least 12 px and trace payload text at least 11 px. Search results announce changes; a confirmation dialog makes the background inert, traps keyboard focus, and returns focus after close.
-- npm test, npm run build, and npm run data:reset work. Tests use isolated temporary directories; they do not alter runtime demo data.
+- npm run build passed on October 23, 2026. npm test, npm run dev, and npm run data:reset still need a post-review run. Tests use isolated temporary directories; they do not alter runtime demo data.
 - The demo clearly says it is local and does not imply Alexa+ connectivity, model use, or actual push reminders.

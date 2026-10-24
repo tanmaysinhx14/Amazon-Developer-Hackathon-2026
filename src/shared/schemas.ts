@@ -71,15 +71,59 @@ export const MissingItemInputSchema = z.object({
   unit: z.enum(["can", "ml", "g", "each", "cloves"]),
 });
 
-export const ChangePreviewInputSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("add_to_shopping_list"), recipeId: z.string().min(1).max(80), servings: z.number().int().min(1).max(6) }).strict(),
-  z.object({ action: z.literal("set_prep_reminder"), recipeId: z.string().min(1).max(80), delayMinutes: z.number().int().min(5).max(180) }).strict(),
-  z.object({ action: z.literal("mark_item_bought"), itemId: z.string().min(1) }).strict(),
-  z.object({ action: z.literal("remove_shopping_item"), itemId: z.string().min(1) }).strict(),
-  z.object({ action: z.literal("mark_cooked"), recipeId: z.string().min(1).max(80), servings: z.number().int().min(1).max(6) }).strict(),
-  z.object({ action: z.literal("set_pantry_item"), itemId: z.string().min(1), amount: z.number().finite().min(0).max(10000) }).strict(),
-  z.object({ action: z.literal("cancel_prep_reminder"), reminderId: z.string().min(1) }).strict(),
+const ChangePreviewActionSchema = z.enum([
+  "add_to_shopping_list",
+  "set_prep_reminder",
+  "mark_item_bought",
+  "remove_shopping_item",
+  "mark_cooked",
+  "set_pantry_item",
+  "cancel_prep_reminder",
 ]);
+
+export const ChangePreviewInputSchema = z.object({
+  action: ChangePreviewActionSchema,
+  recipeId: z.string().min(1).max(80).optional(),
+  servings: z.number().int().min(1).max(6).optional(),
+  delayMinutes: z.number().int().min(5).max(180).optional(),
+  itemId: z.string().min(1).optional(),
+  amount: z.number().finite().min(0).max(10000).optional(),
+  reminderId: z.string().min(1).optional(),
+}).strict().superRefine((input, context) => {
+  const requiredFields: Record<typeof input.action, readonly string[]> = {
+    add_to_shopping_list: ["recipeId", "servings"],
+    set_prep_reminder: ["recipeId", "delayMinutes"],
+    mark_item_bought: ["itemId"],
+    remove_shopping_item: ["itemId"],
+    mark_cooked: ["recipeId", "servings"],
+    set_pantry_item: ["itemId", "amount"],
+    cancel_prep_reminder: ["reminderId"],
+  };
+  const allowedFields = new Set(["action", ...requiredFields[input.action]]);
+  for (const field of requiredFields[input.action]) {
+    if (input[field as keyof typeof input] === undefined) {
+      context.addIssue({ code: "custom", path: [field], message: `${field} is required for ${input.action}.` });
+    }
+  }
+  for (const field of ["recipeId", "servings", "delayMinutes", "itemId", "amount", "reminderId"] as const) {
+    if (input[field] !== undefined && !allowedFields.has(field)) {
+      context.addIssue({ code: "custom", path: [field], message: `${field} is not used by ${input.action}.` });
+    }
+  }
+});
+
+export type ChangePreviewInput =
+  | { action: "add_to_shopping_list"; recipeId: string; servings: number }
+  | { action: "set_prep_reminder"; recipeId: string; delayMinutes: number }
+  | { action: "mark_item_bought"; itemId: string }
+  | { action: "remove_shopping_item"; itemId: string }
+  | { action: "mark_cooked"; recipeId: string; servings: number }
+  | { action: "set_pantry_item"; itemId: string; amount: number }
+  | { action: "cancel_prep_reminder"; reminderId: string };
+
+export function parseChangePreviewInput(value: unknown): ChangePreviewInput {
+  return ChangePreviewInputSchema.parse(value) as ChangePreviewInput;
+}
 
 export const ChangePreviewSchema = z.object({
   confirmationToken: z.string().min(1),
@@ -102,8 +146,6 @@ export const ChangeResultSchema = z.object({
   state: PantryResultSchema,
   message: z.string(),
 });
-
-export const MutationBaseInputSchema = z.object({ confirmationToken: z.string().min(1) });
 
 export const AddShoppingInputSchema = z.object({
   confirmationToken: z.string().min(1),
@@ -131,8 +173,6 @@ export const FindRecipesInputSchema = z.object({
 }).strict();
 
 export const GetPantryInputSchema = z.object({}).strict();
-
-export const ToolErrorSchema = z.object({ message: z.string() });
 
 export const toPantryResult = (state: { pantry: unknown[]; shoppingList: unknown[]; reminders: unknown[] }) => PantryResultSchema.parse({
   items: state.pantry,
